@@ -11,6 +11,10 @@ import queue
 
 # Time window for data retention in seconds
 TIME_WINDOW = 30
+# Data streaming rate in Hz
+DATA_RATE_HZ = 100
+# Plot update interval in milliseconds
+PLOT_UPDATE_INTERVAL_MS = 200  # Update plot every 200 ms (5 times per second)
 
 # Global variable to control the reading thread and animation
 stop_event = threading.Event()
@@ -18,7 +22,7 @@ ani = None
 ser = None
 
 # Initialize a queue to hold parsed data
-data_queue = queue.Queue()
+data_queue = queue.Queue(maxsize=DATA_RATE_HZ * TIME_WINDOW)  # Buffer for data
 
 # Function to compute CRC-32
 def crc32(buf):
@@ -37,7 +41,7 @@ def crc32_from_bytes(data):
     return crc32(buf)
 
 # Function to parse the payload of message type 0x02
-def parse_payload_type_02(payload):
+def parse_payload_type_02(payload, timestamp):
     sequence_number = payload[0]
     height = int.from_bytes(payload[1:3], byteorder='little', signed=True)
     vertical_velocity = int.from_bytes(payload[3:5], byteorder='little', signed=True)
@@ -63,6 +67,7 @@ def parse_payload_type_02(payload):
     yaw_radians = 9.587526e-5 * yaw if validity['yaw'] else None
 
     return {
+        "timestamp": timestamp,
         "sequence_number": sequence_number,
         "height": height_meters,
         "vertical_velocity": vertical_velocity_mps,
@@ -95,7 +100,8 @@ def parse_frame(data):
             if frame_crc != computed_crc:
                 return None
 
-            parsed_data = parse_payload_type_02(data[header_length:header_length + payload_length])
+            timestamp = time.time()
+            parsed_data = parse_payload_type_02(data[header_length:header_length + payload_length], timestamp)
             data_queue.put(parsed_data)  # Put parsed data into the queue
             return parsed_data
         else:
@@ -120,6 +126,7 @@ def read_from_port(ser):
                         break
                 else:
                     buffer = buffer[1:]  # Remove the first byte and retry
+        time.sleep(0.01)  # Add a slight delay to reduce CPU usage
 
 # Function to get available COM ports
 def get_ports():
@@ -144,7 +151,7 @@ def connect():
             if ani is not None:
                 ani.event_source.start()
             else:
-                ani = FuncAnimation(fig, update_plot, interval=100, cache_frame_data=False)
+                ani = FuncAnimation(fig, update_plot, interval=PLOT_UPDATE_INTERVAL_MS, cache_frame_data=False)
         except Exception as e:
             status_label.config(text="Error: " + str(e))
     else:
@@ -178,55 +185,41 @@ def clear_plot_data():
 # Function to update the plot
 def update_plot(frame):
     current_time = time.time()
+    data_chunk = []
     while not data_queue.empty():
         data = data_queue.get()
         if data:
-            time_data.append(current_time - start_time)
+            data_chunk.append(data)
+
+    if data_chunk:
+        for data in data_chunk:
+            time_data.append(data['timestamp'] - start_time)
             height_data.append(data['height'])
             vertical_velocity_data.append(data['vertical_velocity'])
             roll_data.append(data['roll'])
             pitch_data.append(data['pitch'])
             yaw_data.append(data['yaw'])
 
-    # Keep only the last TIME_WINDOW seconds of data
-    while time_data and (current_time - start_time - time_data[0]) > TIME_WINDOW:
-        time_data.pop(0)
-        height_data.pop(0)
-        vertical_velocity_data.pop(0)
-        roll_data.pop(0)
-        pitch_data.pop(0)
-        yaw_data.pop(0)
+        # Keep only the last TIME_WINDOW seconds of data
+        while time_data and (current_time - start_time - time_data[0]) > TIME_WINDOW:
+            time_data.pop(0)
+            height_data.pop(0)
+            vertical_velocity_data.pop(0)
+            roll_data.pop(0)
+            pitch_data.pop(0)
+            yaw_data.pop(0)
 
-    ax[0].cla()
-    ax[1].cla()
-    ax[2].cla()
-    ax[3].cla()
-    ax[4].cla()
+        for axis in ax:
+            axis.cla()
 
-    if time_data:
-        ax[0].plot(time_data, height_data, label="Height (m)")
-        ax[1].plot(time_data, vertical_velocity_data, label="Vertical Velocity (m/s)")
-        ax[2].plot(time_data, roll_data, label="Roll (rad)")
-        ax[3].plot(time_data, pitch_data, label="Pitch (rad)")
-        ax[4].plot(time_data, yaw_data, label="Yaw (rad)")
-
-        ax[0].legend()
-        ax[1].legend()
-        ax[2].legend()
-        ax[3].legend()
-        ax[4].legend()
-
-    ax[0].relim()
-    ax[1].relim()
-    ax[2].relim()
-    ax[3].relim()
-    ax[4].relim()
-
-    ax[0].autoscale_view()
-    ax[1].autoscale_view()
-    ax[2].autoscale_view()
-    ax[3].autoscale_view()
-    ax[4].autoscale_view()
+        if time_data:
+            labels = ["Height (m)", "Vertical Velocity (m/s)", "Roll (rad)", "Pitch (rad)", "Yaw (rad)"]
+            data_lists = [height_data, vertical_velocity_data, roll_data, pitch_data, yaw_data]
+            for axis, label, data_list in zip(ax, labels, data_lists):
+                axis.plot(time_data, data_list, label=label)
+                axis.legend()
+                axis.relim()
+                axis.autoscale_view()
 
 # Set up the GUI
 root = tk.Tk()
@@ -275,6 +268,6 @@ def on_closing():
 root.protocol("WM_DELETE_WINDOW", on_closing)
 
 # Start animation
-ani = FuncAnimation(fig, update_plot, interval=100, cache_frame_data=False)
+ani = FuncAnimation(fig, update_plot, interval=PLOT_UPDATE_INTERVAL_MS, cache_frame_data=False)
 
 root.mainloop()
